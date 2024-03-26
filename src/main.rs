@@ -46,6 +46,40 @@ impl Reader {
     }
 }
 
+struct Book {
+    id: i32,
+    name: String 
+}
+
+impl Book {
+    async fn new(
+        name: String, pool: &sqlx::PgPool
+    ) -> Result<Book, sqlx::Error> {
+
+        sqlx::query!("insert into book (id, name)
+                         values (
+                             (
+                                select case when max(id) is null then 0
+                                            else max(id)
+                                       end
+                                from book
+                             ) + 1,
+                             $1
+                      )", name).execute(pool).await?;
+
+        let book = sqlx::query_as!(Book, 
+                r#"select id, 
+                          name as "name!"
+                   from book 
+                   group by id 
+                   having id = max(id)"#)
+            .fetch_one(pool)
+            .await?;
+
+        Ok(book)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error> {
     let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
@@ -53,7 +87,7 @@ async fn main() -> Result<(), sqlx::Error> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    let reader = Reader::new(String::from("John"), String::from("Doe"), &pool).await?; 
+    let book = Book::new(String::from("Dao de Zin"), &pool).await?;
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
