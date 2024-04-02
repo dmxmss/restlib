@@ -1,4 +1,6 @@
 use std::{
+    str,
+    error::Error,
     fs,
     net::TcpStream,
     io::{prelude::*, BufReader}
@@ -12,7 +14,7 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub async fn new(
+    pub async fn create(
         firstname: String, surname: String, pool: &sqlx::PgPool
     ) -> Result<Reader, sqlx::Error> {
 
@@ -96,16 +98,51 @@ impl Book {
     }
 }
 
-pub fn handle_connection(mut stream: TcpStream) {
-    let buf_reader = BufReader::new(&mut stream);
-    let request_line = buf_reader.lines().next().unwrap().unwrap();
-    
+fn get_request(mut buf_reader: BufReader<TcpStream>) -> Result<String, Box<dyn Error>> {
+    let request = str::from_utf8(buf_reader.fill_buf()?)?.to_string();
+    buf_reader.consume(request.len());
+    Ok(request)
+}
+
+fn parse_post_data(data: String) -> (String, String) {
+    let mut cred: Vec<String> = data.split("&").map(|s| {
+        s.split("=").last().unwrap().to_string()
+    }).collect();
+
+    let surname = cred.pop().unwrap();
+    let firstname = cred.pop().unwrap();
+
+    (firstname, surname)
+}
+
+pub async fn handle_connection(mut stream: TcpStream, pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
+    let buf_reader = BufReader::new(stream.try_clone().unwrap());
+    let request = get_request(buf_reader)?;
+    let mut lines = request.lines();
+    let request_line = lines.next().unwrap();
+    let body = lines.last().unwrap().to_string();
+   
     let (status, file) = match &request_line[..] {
         "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", "index.html"),
+        "GET /signup HTTP/1.1" => ("HTTP/1.1 200 OK", "signup.html"),
+        "POST /readers HTTP/1.1" => {
+            let (firstname, surname) = parse_post_data(body);
+
+            match Reader::create(firstname, surname, pool).await {
+                Ok(_) => ("HTTP/1.1 201 CREATED", "index.html"),
+                Err(e) => {
+                    println!("{:?}", e);
+                    ("HTTP/1.1 409 CONFLICT", "index.html")
+                }
+            }
+        },
         _ => ("HTTP/1.1 404 NOT FOUND", "404.html")
     };
 
     let contents = fs::read_to_string(file).unwrap();
     let response = format!("{}\r\nContent-Length: {}\r\n\r\n{}", status, contents.len(), contents);
     stream.write_all(response.as_bytes()).unwrap();
+
+    Ok(())
 }
+
