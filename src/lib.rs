@@ -98,10 +98,50 @@ impl Book {
     }
 }
 
-fn get_request(mut buf_reader: BufReader<TcpStream>) -> Result<String, Box<dyn Error>> {
-    let request = str::from_utf8(buf_reader.fill_buf()?)?.to_string();
-    buf_reader.consume(request.len());
-    Ok(request)
+pub async fn handle_connection(mut stream: TcpStream, pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
+    let (request_line, body) = handle_stream(&mut stream)?;
+   
+    let (status, file) = route_request(request_line, body, pool).await;
+
+    let contents = fs::read_to_string(file).unwrap();
+    let response = format!("{}\r\nContent-Length: {}\r\n\r\n{}", status, contents.len(), contents);
+    stream.write_all(response.as_bytes()).unwrap();
+
+    Ok(())
+}
+
+fn handle_stream(stream: &mut TcpStream) -> Result<(String, String), Box<dyn Error>> {
+    let buf_reader = BufReader::new(stream.try_clone().unwrap());
+    let request = get_request_contents(buf_reader)?;
+    let mut lines = request.lines();
+
+    let request_line = lines.next().unwrap().to_string();
+    let body = lines.last().unwrap().to_string();
+
+    Ok((request_line, body))
+}
+
+async fn route_request(request_line: String, body: String, pool: &sqlx::PgPool) -> (&'static str, &'static str) {
+    match &request_line[..] {
+        "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", "index.html"),
+
+        "GET /signup HTTP/1.1" => ("HTTP/1.1 200 OK", "signup.html"),
+
+        "POST /readers HTTP/1.1" => {
+            let (firstname, surname) = parse_post_data(body);
+            let path = "index.html";
+
+            match Reader::create(firstname.to_string(), surname.to_string(), pool).await {
+                Ok(_) => ("HTTP/1.1 201 CREATED", path),
+                Err(e) => {
+                    println!("{:?}", e);
+                    ("HTTP/1.1 409 CONFLICT", path)
+                }
+            }
+        },
+
+        _ => ("HTTP/1.1 404 NOT FOUND", "404.html")
+    }
 }
 
 fn parse_post_data(data: String) -> (String, String) {
@@ -115,34 +155,9 @@ fn parse_post_data(data: String) -> (String, String) {
     (firstname, surname)
 }
 
-pub async fn handle_connection(mut stream: TcpStream, pool: &sqlx::PgPool) -> Result<(), Box<dyn Error>> {
-    let buf_reader = BufReader::new(stream.try_clone().unwrap());
-    let request = get_request(buf_reader)?;
-    let mut lines = request.lines();
-    let request_line = lines.next().unwrap();
-    let body = lines.last().unwrap().to_string();
-   
-    let (status, file) = match &request_line[..] {
-        "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", "index.html"),
-        "GET /signup HTTP/1.1" => ("HTTP/1.1 200 OK", "signup.html"),
-        "POST /readers HTTP/1.1" => {
-            let (firstname, surname) = parse_post_data(body);
-
-            match Reader::create(firstname, surname, pool).await {
-                Ok(_) => ("HTTP/1.1 201 CREATED", "index.html"),
-                Err(e) => {
-                    println!("{:?}", e);
-                    ("HTTP/1.1 409 CONFLICT", "index.html")
-                }
-            }
-        },
-        _ => ("HTTP/1.1 404 NOT FOUND", "404.html")
-    };
-
-    let contents = fs::read_to_string(file).unwrap();
-    let response = format!("{}\r\nContent-Length: {}\r\n\r\n{}", status, contents.len(), contents);
-    stream.write_all(response.as_bytes()).unwrap();
-
-    Ok(())
+fn get_request_contents(mut buf_reader: BufReader<TcpStream>) -> Result<String, Box<dyn Error>> {
+    let request = str::from_utf8(buf_reader.fill_buf()?)?.to_string();
+    buf_reader.consume(request.len());
+    Ok(request)
 }
 
